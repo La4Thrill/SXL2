@@ -1,104 +1,339 @@
-#include "global_vars.h"
 #include "simulator.h"
+#include "global_vars.h"
 #include "audio_hint.h"
-#include <unistd.h>
-#include <math.h>
-#include <stdlib.h>
+#include "db_manager.h"
 
-// 模拟传感器数据生成 (带噪声)
-float generate_sensor_data() {
-    // 基础信号 1.0 + 随机噪声 (-0.5 ~ 0.5)
-    return 1.0 + ((float)rand() / RAND_MAX - 0.5);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+#define MAX_SIM_FILES 8
+#define SAMPLE_INTERVAL_MS 100
+#define STEP_THRESHOLD 1200.0f
+#define STEP_RISE 80.0f
+#define STEPS_PER_FLOOR 20
+
+typedef struct {
+    float gx;
+    float gy;
+    float gz;
+    float ax;
+    float ay;
+    float az;
+} SensorSample;
+
+static char s_files[MAX_SIM_FILES][260];
+static int s_file_count = 0;
+static int s_file_index = 0;
+static int s_last_line = 0;
+static bool s_loop_mode = true;
+static FILE* s_current_fp = NULL;
+
+static FILE* open_with_fallback(const char* path) {
+    FILE* fp = fopen(path, "r");
+    if (fp) {
+        return fp;
+    }
+
+    char candidate[320];
+    snprintf(candidate, sizeof(candidate), "..\\%s", path);
+    fp = fopen(candidate, "r");
+    if (fp) {
+        return fp;
+    }
+
+    snprintf(candidate, sizeof(candidate), "..\\..\\%s", path);
+    fp = fopen(candidate, "r");
+    if (fp) {
+        return fp;
+    }
+
+    return NULL;
 }
 
-void* simulator_thread(void *arg) {
-    int uid = *(int*)arg;
-    free(arg);
+static void sleep_ms(int ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    usleep(ms * 1000);
+#endif
+}
 
-    if (uid < 1 || uid > MAX_USERS) return NULL;
-    User *u = &g_users[uid - 1];
+static void close_current_file(void) {
+    if (s_current_fp) {
+        fclose(s_current_fp);
+        s_current_fp = NULL;
+    }
+}
 
-    printf("[Thread] 用户 %s 模拟线程启动\n", u->username);
+static bool open_current_file(void) {
+    close_current_file();
+    if (s_file_count <= 0 || s_file_index < 0 || s_file_index >= s_file_count) {
+        return false;
+    }
 
+    s_current_fp = open_with_fallback(s_files[s_file_index]);
+    if (!s_current_fp) {
+        return false;
+    }
+
+    char header[256];
+    if (!fgets(header, sizeof(header), s_current_fp)) {
+        close_current_file();
+        return false;
+    }
+    return true;
+}
+
+static bool open_next_file(void) {
+    if (s_file_count <= 0) {
+        return false;
+    }
+
+    int attempts = 0;
+    while (attempts < s_file_count) {
+        if (open_current_file()) {
+            return true;
+        }
+        s_file_index = (s_file_index + 1) % s_file_count;
+        attempts++;
+    }
+    return false;
+}
+
+static bool parse_sample_line(const char* line, SensorSample* sample) {
+    return sscanf(line, "%f %f %f %f %f %f",
+        &sample->gx, &sample->gy, &sample->gz,
+        &sample->ax, &sample->ay, &sample->az) == 6;
+}
+
+static bool read_next_sample(SensorSample* sample) {
+    if (s_file_count <= 0) {
+        return false;
+    }
+
+    if (!s_current_fp) {
+        if (!open_next_file()) {
+            return false;
+        }
+    }
+
+    char line[256];
     while (1) {
-        // 1. 检查是否运行
-        if (!g_system_state.simulation_running) {
-            usleep(100000); // 休眠等待
+        if (fgets(line, sizeof(line), s_current_fp)) {
+            if (parse_sample_line(line, sample)) {
+                s_last_line++;
+                return true;
+            }
             continue;
         }
 
-        // 2. 检查重置
-        if (g_system_state.reset_requested) {
-            // 已在 globals.c 处理数据重置，这里只需等待标志位清除或直接继续
-            // 简单处理：如果重置了，重新开始计时
-             if (g_system_state.start_time == 0) {
-                g_system_state.start_time = time(NULL);
+        close_current_file();
+        s_file_index++;
+
+        if (s_file_index >= s_file_count) {
+            if (!s_loop_mode) {
+                return false;
             }
-        } else {
-            // 首次启动计时
-            if (g_system_state.start_time == 0) {
-                g_system_state.start_time = time(NULL);
+            s_file_index = 0;
+        }
+
+        if (!open_next_file()) {
+            return false;
+        }
+    }
+}
+
+void init_users(void) {
+    for (int i = 0; i < MAX_USERS; ++i) {
+        pthread_mutex_lock(&g_users[i].mutex);
+        g_users[i].current_floor = 1;
+        g_users[i].total_steps = 0;
+        g_users[i].speed_per_minute = 0.0f;
+        g_users[i].sent_lines = 0;
+        g_users[i].buffer_index = 0;
+        memset(g_users[i].data_buffer, 0, sizeof(g_users[i].data_buffer));
+        pthread_mutex_unlock(&g_users[i].mutex);
+    }
+}
+
+void sim_set_data_files(const char** files, int count, bool loop_mode) {
+    s_file_count = 0;
+    s_file_index = 0;
+    s_last_line = 0;
+    s_loop_mode = loop_mode;
+
+    if (files && count > 0) {
+        int limit = count > MAX_SIM_FILES ? MAX_SIM_FILES : count;
+        for (int i = 0; i < limit; ++i) {
+            snprintf(s_files[i], sizeof(s_files[i]), "%s", files[i]);
+            s_file_count++;
+        }
+    }
+
+    close_current_file();
+}
+
+void sim_start(void) {
+    if (g_system_state.start_time == 0) {
+        g_system_state.start_time = time(NULL);
+    }
+    g_system_state.simulation_running = true;
+}
+
+void sim_stop(void) {
+    g_system_state.simulation_running = false;
+}
+
+void sim_reset(void) {
+    init_users();
+    g_total_climbed = 0;
+    g_current_floor = 1;
+    g_speed_per_minute = 0.0f;
+    g_system_state.start_time = time(NULL);
+    s_file_index = 0;
+    s_last_line = 0;
+    close_current_file();
+}
+
+void reset_simulation(void) {
+    sim_reset();
+}
+
+bool sim_is_running(void) {
+    return g_system_state.simulation_running;
+}
+
+int sim_get_current_floor(int user_id) {
+    if (user_id < 0 || user_id >= MAX_USERS) {
+        return 1;
+    }
+
+    int floor;
+    pthread_mutex_lock(&g_users[user_id].mutex);
+    floor = g_users[user_id].current_floor;
+    pthread_mutex_unlock(&g_users[user_id].mutex);
+    return floor;
+}
+
+int sim_get_total_climbed(int user_id) {
+    if (user_id < 0 || user_id >= MAX_USERS) {
+        return 0;
+    }
+
+    int steps;
+    pthread_mutex_lock(&g_users[user_id].mutex);
+    steps = g_users[user_id].total_steps;
+    pthread_mutex_unlock(&g_users[user_id].mutex);
+    return steps;
+}
+
+double sim_get_speed(int user_id) {
+    if (user_id < 0 || user_id >= MAX_USERS) {
+        return 0.0;
+    }
+
+    double speed;
+    pthread_mutex_lock(&g_users[user_id].mutex);
+    speed = g_users[user_id].speed_per_minute;
+    pthread_mutex_unlock(&g_users[user_id].mutex);
+    return speed;
+}
+
+int sim_get_sent_lines(int user_id) {
+    if (user_id < 0 || user_id >= MAX_USERS) {
+        return s_last_line;
+    }
+
+    int sent;
+    pthread_mutex_lock(&g_users[user_id].mutex);
+    sent = g_users[user_id].sent_lines;
+    pthread_mutex_unlock(&g_users[user_id].mutex);
+    return sent;
+}
+
+void* simulator_thread_func(void* arg) {
+    (void)arg;
+
+    SensorSample sample = {0};
+    float last_filtered = 0.0f;
+    int cooldown = 0;
+
+    while (g_system_running) {
+        if (g_reset_requested || g_system_state.reset_requested) {
+            sim_reset();
+            g_reset_requested = false;
+            g_system_state.reset_requested = false;
+            last_filtered = 0.0f;
+            cooldown = 0;
+        }
+
+        if (!sim_is_running()) {
+            sleep_ms(100);
+            continue;
+        }
+
+        if (!read_next_sample(&sample)) {
+            sim_stop();
+            sleep_ms(100);
+            continue;
+        }
+
+        float magnitude = sqrtf(sample.ax * sample.ax + sample.ay * sample.ay + sample.az * sample.az);
+
+        User* user = &g_users[0];
+        pthread_mutex_lock(&user->mutex);
+
+        user->data_buffer[user->buffer_index] = magnitude;
+        user->buffer_index = (user->buffer_index + 1) % DATA_BUFFER_SIZE;
+        user->sent_lines = s_last_line;
+
+        float filtered = (last_filtered * 0.8f) + (magnitude * 0.2f);
+
+        bool is_step = false;
+        if (cooldown > 0) {
+            cooldown--;
+        } else if ((filtered > STEP_THRESHOLD) && ((filtered - last_filtered) > STEP_RISE)) {
+            is_step = true;
+            cooldown = 2;
+        }
+
+        if (is_step) {
+            user->total_steps++;
+            int floor = 1 + (user->total_steps / STEPS_PER_FLOOR);
+            if (floor > g_max_floors) {
+                floor = g_max_floors;
             }
-        }
+            user->current_floor = floor;
 
-        pthread_mutex_lock(&u->mutex);
-
-        if (u->current_floor >= MAX_FLOORS) {
-            // 到达顶层，停止该用户模拟
-            pthread_mutex_unlock(&u->mutex);
-            printf("[Done] 用户 %s 已到达顶层 %d\n", u->username, MAX_FLOORS);
-            break;
-        }
-
-        // 3. 获取新数据
-        float new_val = generate_sensor_data();
-
-        // 4. 【核心】滑动平均滤波算法
-        u->data_buffer[u->buffer_index] = new_val;
-        u->buffer_index = (u->buffer_index + 1) % DATA_BUFFER_SIZE;
-
-        // 计算窗口平均值
-        float sum = 0;
-        for(int i=0; i<DATA_BUFFER_SIZE; i++) {
-            sum += u->data_buffer[i];
-        }
-        float avg = sum / DATA_BUFFER_SIZE;
-
-        // 滤波判断：平均值大于阈值 (例如 0.8) 才认为是一步有效动作
-        // 这可以滤除瞬间的尖峰干扰
-        if (avg > 0.8) {
-            // 防止重复计数：简单策略，每次循环只计一步，实际项目可能需要状态机
-            // 这里为了演示，假设每次循环代表一个采样周期，如果持续高于阈值则计数
-            // 优化：引入一个简单的去抖动逻辑，或者这里仅作为演示累加
-            // 为了符合课题“滤除干扰”，我们假设只有连续多次高于阈值才算一步
-            // 此处简化：只要平均后高于阈值，且距离上次计数有一定间隔（通过延时控制）
-
-            u->total_steps++;
-            u->current_floor++; // 假设一步一层，或者根据算法映射
-
-            // 5. 计算速度 (步/分钟)
             time_t now = time(NULL);
             double elapsed = difftime(now, g_system_state.start_time);
-            if (elapsed > 0) {
-                u->speed_per_minute = u->total_steps / (elapsed / 60.0);
+            if (elapsed > 0.0) {
+                user->speed_per_minute = (float)(user->total_steps / (elapsed / 60.0));
             }
 
-            // 6. 触发音频提示逻辑
-            // 注意：不要在锁内调用耗时操作，但 check_audio_hint 很快，可以接受
-            // 为了线程安全，传入 user_id 让函数内部再取锁或自行处理
-            pthread_mutex_unlock(&u->mutex); // 先解锁，避免死锁
-            // 【正确】新调用 —— 假设 u 是当前用户指针
-            check_audio_hint(u->current_floor, u->total_steps);
+            g_current_floor = user->current_floor;
+            g_total_climbed = user->current_floor - 1;
+            g_speed_per_minute = user->speed_per_minute;
 
-            pthread_mutex_lock(&u->mutex); // 重新加锁打印日志
-            printf("[Sim] %s: 楼层 %d/%d, 步数 %d, 速度 %.1f 步/分\n",
-                   u->username, u->current_floor, MAX_FLOORS, u->total_steps, u->speed_per_minute);
+            save_progress(user->user_id, user->current_floor, user->total_steps, user->speed_per_minute);
+            check_audio_hint(user->current_floor, user->total_steps);
         }
 
-        pthread_mutex_unlock(&u->mutex);
+        last_filtered = filtered;
+        pthread_mutex_unlock(&user->mutex);
 
-        // 模拟采样频率 (例如 0.5秒一次)
-        usleep(500000);
+        sleep_ms(SAMPLE_INTERVAL_MS);
     }
+
+    close_current_file();
     return NULL;
 }

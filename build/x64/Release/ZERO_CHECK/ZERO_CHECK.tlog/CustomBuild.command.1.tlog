@@ -1,0 +1,10 @@
+^C:\USERS\ADMINISTRATOR\DESKTOP\LYM\SXL2\BUILD\CMAKEFILES\327DE26BCEFE643BECE7BB6D0BD87ECC\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/Administrator/Desktop/lym/SXL2 -BC:/Users/Administrator/Desktop/lym/SXL2/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Administrator/Desktop/lym/SXL2/build/StairClimbingSimulator.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

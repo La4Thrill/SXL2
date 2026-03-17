@@ -43,4 +43,13 @@ bool save_progress(int user_id, int floor, int steps, float speed);
  */
 bool load_progress(int user_id, int* out_floor, int* out_steps, float* out_speed);
 
+/**
+ * @brief 获取最近历史记录 JSON 数组字符串（调用方负责 free）
+ */
+char* get_recent_history_json(int limit);
+
+// 兼容旧代码命名
+int db_init(void);
+void db_close(void);
+
 #endif // DB_MANAGER_H

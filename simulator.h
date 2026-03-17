@@ -14,6 +14,11 @@
 void init_users(void);
 
 /**
+ * @brief 配置模拟数据文件列表
+ */
+void sim_set_data_files(const char** files, int count, bool loop_mode);
+
+/**
  * @brief 启动模拟器
  */
 void sim_start(void);
@@ -29,9 +34,19 @@ void sim_stop(void);
 void sim_reset(void);
 
 /**
+ * @brief 兼容 web_server 的重置入口
+ */
+void reset_simulation(void);
+
+/**
  * @brief 获取当前是否正在运行
  */
 bool sim_is_running(void);
+
+/**
+ * @brief 获取当前已发送样本行数
+ */
+int sim_get_sent_lines(int user_id);
 
 // ==========================================
 // 内部线程入口 (供 pthread_create 使用)

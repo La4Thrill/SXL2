@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+
+# Visual Studio
+.vs/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Databases and runtime files
+*.db
+*.sqlite
+
+# Logs
+*.log
+
+# Ignore temporary editor files
+*~
+*.swp
+.DS_Store

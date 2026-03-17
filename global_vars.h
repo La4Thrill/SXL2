@@ -3,14 +3,22 @@
 
 #include <stdbool.h>
 #include <time.h>
+#ifdef _WIN32
+#include "pthread_compat.h"
+#else
+#include <pthread.h>
+#endif
 
 // ==========================================================
 // ⚙️ 配置常量
 // ==========================================================
 
-#define MAX_USERS       100      // 最大支持用户数
-#define USERNAME_LEN    50       // 用户名最大长度
-#define BUFFER_SIZE     10       // 传感器数据缓冲区大小
+#define MAX_USERS         100      // 最大支持用户数
+#define USERNAME_LEN      50       // 用户名最大长度
+#define DEVICE_ID_LEN     32       // 设备ID长度
+#define BUFFER_SIZE       10       // 兼容旧代码的缓冲常量
+#define DATA_BUFFER_SIZE  32       // 传感器数据缓冲区大小
+#define MAX_FLOORS        99       // 最大楼层支持
 
 // ==========================================================
 // 📦 数据结构定义
@@ -24,12 +32,15 @@
 typedef struct {
     int user_id;                      // 用户ID
     char username[USERNAME_LEN];      // 用户名
+    char device_id[DEVICE_ID_LEN];    // 终端/设备ID
     int current_floor;                // 当前楼层
     int total_steps;                  // 总步数
     float speed_per_minute;           // 速度 (步/分钟)
+    int sent_lines;                   // 已发送样本行数
+    int buffer_index;                 // 环形缓冲区索引
+    pthread_mutex_t mutex;            // 用户级互斥锁
 
-    // ✅ 方案 A: 添加数据缓冲区，用于存储最近的传感器读数或模拟数据
-    float data_buffer[BUFFER_SIZE];
+    float data_buffer[DATA_BUFFER_SIZE];
 } User;
 
 /**
@@ -57,6 +68,7 @@ extern SystemState g_system_state;
 extern int g_total_climbed;           // 累计攀爬楼层
 extern int g_current_floor;           // 当前全局楼层
 extern float g_speed_per_minute;      // 全局平均速度
+extern int g_max_floors;              // 系统楼层上限
 
 // 4. 控制标志
 extern volatile bool g_system_running;    // 系统运行开关

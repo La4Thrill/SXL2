@@ -1,244 +1,313 @@
+#include "web_server.h"
+#include "global_vars.h"
+#include "simulator.h"
+#include "db_manager.h"
+#include "cjson.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
-#include <time.h>
-#include <stdbool.h>
-#include <pthread.h>
-#include "web_server.h"
+
 #ifdef _WIN32
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <windows.h>
-    #pragma comment(lib, "ws2_32.lib")
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#pragma comment(lib, "ws2_32.lib")
 #else
-    #include <sys/socket.h>
-    #include <netinet/in.h>
-    #include <unistd.h>
-    #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
 #endif
 
-// ✅ 核心修复：引入统一的全局变量头文件，替代所有手写的 extern 声明
-#include "global_vars.h"
+#define SERVER_PORT 8080
+#define HTTP_BUFFER_SIZE 8192
 
-#include "cjson.h"
-#include "db_manager.h"
-#include "audio_hint.h"
+static int g_server_socket = -1;
 
-#define PORT 8080
-#define BUFFER_SIZE 4096
-
-// 全局套接字描述符 (用于优雅退出)
-int server_socket = -1;
-
-// 函数声明
-void* handle_client(void* arg);
-void send_response(int client_sock, const char* status, const char* message, const char* data_json);
-void parse_request(int client_sock, char* buffer);
-
-// 启动 Web 服务器
-void start_web_server() {
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len;
-    pthread_t thread_id;
-
-    // 初始化 Winsock (Windows 特有)
-    #ifdef _WIN32
-        WSADATA wsaData;
-        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-            printf("[ERROR] WSAStartup failed.\n");
-            return;
-        }
-    #endif
-
-    // 创建套接字
-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == -1) {
-        perror("Socket creation failed");
-        return;
+static FILE* open_text_with_fallback(const char* path) {
+    FILE* fp = fopen(path, "rb");
+    if (fp) {
+        return fp;
     }
 
-    // 设置地址重用 (防止重启时报 Address already in use)
-    int opt = 1;
-    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-    // 配置服务器地址
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
-
-    // 绑定
-    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
-        #ifdef _WIN32
-            closesocket(server_socket);
-            WSACleanup();
-        #else
-            close(server_socket);
-        #endif
-        return;
+    char candidate[320];
+    snprintf(candidate, sizeof(candidate), "..\\%s", path);
+    fp = fopen(candidate, "rb");
+    if (fp) {
+        return fp;
     }
 
-    printf("[INFO] Server listening on port %d...\n", PORT);
-
-    // 监听
-    if (listen(server_socket, 10) < 0) {
-        perror("Listen failed");
-        return;
+    snprintf(candidate, sizeof(candidate), "..\\..\\%s", path);
+    fp = fopen(candidate, "rb");
+    if (fp) {
+        return fp;
     }
-
-    // 主循环
-    while (g_system_running) { // 使用全局变量控制循环
-        client_len = sizeof(client_addr);
-        int client_sock = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
-
-        if (client_sock < 0) {
-            if (g_reset_requested) break; // 如果收到重置信号则退出
-            perror("Accept failed");
-            continue;
-        }
-
-        printf("[INFO] New connection from %s\n", inet_ntoa(client_addr.sin_addr));
-
-        // 创建线程处理客户端
-        if (pthread_create(&thread_id, NULL, handle_client, (void*)&client_sock) != 0) {
-            perror("Could not create thread");
-            #ifdef _WIN32
-                closesocket(client_sock);
-            #else
-                close(client_sock);
-            #endif
-        } else {
-            pthread_detach(thread_id); // 分离线程，自动释放资源
-        }
-    }
-
-    // 清理
-    #ifdef _WIN32
-        closesocket(server_socket);
-        WSACleanup();
-    #else
-        close(server_socket);
-    #endif
-    printf("[INFO] Web Server stopped.\n");
-}
-
-// 客户端处理线程
-void* handle_client(void* arg) {
-    int client_sock = *(int*)arg;
-    char buffer[BUFFER_SIZE] = {0};
-    char response[BUFFER_SIZE] = {0};
-
-    // 读取请求
-    int valread = recv(client_sock, buffer, BUFFER_SIZE, 0);
-    if (valread <= 0) {
-        #ifdef _WIN32
-            closesocket(client_sock);
-        #else
-            close(client_sock);
-        #endif
-        return NULL;
-    }
-
-    // 简单解析 HTTP 请求 (只处理 GET)
-    if (strncmp(buffer, "GET", 3) == 0) {
-        parse_request(client_sock, buffer);
-    } else {
-        send_response(client_sock, "405 Method Not Allowed", "Only GET supported", NULL);
-    }
-
-    // 关闭连接
-    #ifdef _WIN32
-        closesocket(client_sock);
-    #else
-        close(client_sock);
-    #endif
 
     return NULL;
 }
 
-// 解析请求路径并响应
-void parse_request(int client_sock, char* buffer) {
-    char path[256] = {0};
-    // 提取路径 (例如: GET /api/status HTTP/1.1)
-    sscanf(buffer, "GET %255s", path);
+static void close_socket_safe(int sock) {
+#ifdef _WIN32
+    closesocket(sock);
+#else
+    close(sock);
+#endif
+}
 
-    // 去除末尾可能存在的 HTTP 版本或参数
-    char* space = strchr(path, ' ');
-    if (space) *space = '\0';
+static void send_text_response(int client_sock, const char* status, const char* content_type, const char* body) {
+    if (!body) {
+        body = "";
+    }
 
-    cJSON* root = cJSON_CreateObject();
-    char* json_str = NULL;
+    char header[512];
+    int len = (int)strlen(body);
 
-    // 路由处理
-    if (strcmp(path, "/api/status") == 0) {
-        // 获取实时数据 (注意加锁保护)
+    snprintf(header, sizeof(header),
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n\r\n",
+        status, content_type, len);
+
+    send(client_sock, header, (int)strlen(header), 0);
+    if (len > 0) {
+        send(client_sock, body, len, 0);
+    }
+}
+
+static void send_json_response(int client_sock, const char* status, cJSON* root) {
+    char* json = cJSON_PrintUnformatted(root);
+    send_text_response(client_sock, status, "application/json", json ? json : "{}");
+    if (json) {
+        free(json);
+    }
+}
+
+static void serve_index_html(int client_sock) {
+    FILE* fp = open_text_with_fallback("index.html");
+    if (!fp) {
+        send_text_response(client_sock, "404 Not Found", "text/plain", "index.html not found");
+        return;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (size < 0 || size > 2 * 1024 * 1024) {
+        fclose(fp);
+        send_text_response(client_sock, "500 Internal Server Error", "text/plain", "invalid file size");
+        return;
+    }
+
+    char* content = (char*)malloc((size_t)size + 1);
+    if (!content) {
+        fclose(fp);
+        send_text_response(client_sock, "500 Internal Server Error", "text/plain", "malloc failed");
+        return;
+    }
+
+    fread(content, 1, (size_t)size, fp);
+    content[size] = '\0';
+    fclose(fp);
+
+    send_text_response(client_sock, "200 OK", "text/html; charset=utf-8", content);
+    free(content);
+}
+
+static void handle_get(int client_sock, const char* path) {
+    if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
+        serve_index_html(client_sock);
+        return;
+    }
+
+    if (strncmp(path, "/api/status", 11) == 0) {
+        cJSON* root = cJSON_CreateObject();
+
         pthread_mutex_lock(&g_users[0].mutex);
-        cJSON_AddNumberToObject(root, "floor", g_users[0].current_floor);
-        cJSON_AddNumberToObject(root, "steps", g_users[0].total_steps);
+        cJSON_AddStringToObject(root, "user", g_users[0].username);
+        cJSON_AddStringToObject(root, "device_id", g_users[0].device_id);
+        cJSON_AddNumberToObject(root, "current_floor", g_users[0].current_floor);
+        cJSON_AddNumberToObject(root, "climbed", g_users[0].total_steps);
         cJSON_AddNumberToObject(root, "speed", g_users[0].speed_per_minute);
+        cJSON_AddNumberToObject(root, "file_lines", g_users[0].sent_lines);
         pthread_mutex_unlock(&g_users[0].mutex);
 
-        cJSON_AddBoolToObject(root, "running", g_system_state.simulation_running);
+        cJSON_AddBoolToObject(root, "running", sim_is_running());
         cJSON_AddNumberToObject(root, "max_floors", g_max_floors);
 
-        json_str = cJSON_PrintUnformatted(root);
-        send_response(client_sock, "200 OK", "Success", json_str);
-        free(json_str);
-
-    } else if (strcmp(path, "/api/reset") == 0) {
-        // 触发重置
-        g_reset_requested = true;
-        reset_simulation(); // 调用全局重置函数
-
-        cJSON_AddStringToObject(root, "status", "reset_triggered");
-        json_str = cJSON_PrintUnformatted(root);
-        send_response(client_sock, "200 OK", "Reset Command Received", json_str);
-        free(json_str);
-
-    } else if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
-        // 返回简单的 HTML 页面 (实际项目中应读取 index.html 文件)
-        const char* html = "<html><body><h1>Smart Stair Climbing Sim</h1><p>Status: Running</p><script>setTimeout(()=>location.reload(), 2000);</script></body></html>";
-
-        char http_header[512];
-        sprintf(http_header,
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html\r\n"
-            "Content-Length: %zu\r\n"
-            "Connection: close\r\n\r\n", strlen(html));
-
-        send(client_sock, http_header, strlen(http_header), 0);
-        send(client_sock, html, strlen(html), 0);
-
+        send_json_response(client_sock, "200 OK", root);
         cJSON_Delete(root);
         return;
+    }
 
+    if (strncmp(path, "/api/history", 12) == 0) {
+        char* json = get_recent_history_json(10);
+        send_text_response(client_sock, "200 OK", "application/json", json ? json : "[]");
+        if (json) {
+            free(json);
+        }
+        return;
+    }
+
+    if (strcmp(path, "/api/reset") == 0) {
+        g_reset_requested = true;
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "status", "reset_requested");
+        send_json_response(client_sock, "200 OK", root);
+        cJSON_Delete(root);
+        return;
+    }
+
+    send_text_response(client_sock, "404 Not Found", "application/json", "{\"error\":\"not found\"}");
+}
+
+static void handle_post(int client_sock, const char* path) {
+    cJSON* root = cJSON_CreateObject();
+
+    if (strcmp(path, "/start") == 0) {
+        sim_start();
+        cJSON_AddStringToObject(root, "status", "started");
+        send_json_response(client_sock, "200 OK", root);
+    } else if (strcmp(path, "/stop") == 0) {
+        sim_stop();
+        cJSON_AddStringToObject(root, "status", "stopped");
+        send_json_response(client_sock, "200 OK", root);
+    } else if (strcmp(path, "/reset") == 0) {
+        g_reset_requested = true;
+        cJSON_AddStringToObject(root, "status", "reset_requested");
+        send_json_response(client_sock, "200 OK", root);
     } else {
-        cJSON_AddStringToObject(root, "error", "404 Not Found");
-        json_str = cJSON_PrintUnformatted(root);
-        send_response(client_sock, "404 Not Found", "Resource not found", json_str);
-        free(json_str);
+        cJSON_AddStringToObject(root, "error", "not found");
+        send_json_response(client_sock, "404 Not Found", root);
     }
 
     cJSON_Delete(root);
 }
 
-// 发送标准 HTTP 响应
-void send_response(int client_sock, const char* status, const char* message, const char* data_json) {
-    char header[1024];
-    int content_length = data_json ? strlen(data_json) : 0;
+static void* handle_client(void* arg) {
+    int client_sock = *(int*)arg;
+    free(arg);
 
-    sprintf(header,
-        "HTTP/1.1 %s\r\n"
-        "Content-Type: application/json\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n\r\n",
-        status, content_length);
+    char buffer[HTTP_BUFFER_SIZE];
+    memset(buffer, 0, sizeof(buffer));
 
-    send(client_sock, header, strlen(header), 0);
-    if (data_json) {
-        send(client_sock, data_json, content_length, 0);
+    int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes <= 0) {
+        close_socket_safe(client_sock);
+        return NULL;
     }
+
+    char method[8] = {0};
+    char path[256] = {0};
+    sscanf(buffer, "%7s %255s", method, path);
+
+    char* q = strchr(path, '?');
+    if (q) {
+        *q = '\0';
+    }
+
+    if (strcmp(method, "GET") == 0) {
+        handle_get(client_sock, path);
+    } else if (strcmp(method, "POST") == 0) {
+        handle_post(client_sock, path);
+    } else if (strcmp(method, "OPTIONS") == 0) {
+        send_text_response(client_sock, "200 OK", "text/plain", "");
+    } else {
+        send_text_response(client_sock, "405 Method Not Allowed", "application/json", "{\"error\":\"method not allowed\"}");
+    }
+
+    close_socket_safe(client_sock);
+    return NULL;
+}
+
+void start_web_server(void) {
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        fprintf(stderr, "[WEB] WSAStartup failed\n");
+        return;
+    }
+#endif
+
+    g_server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_server_socket < 0) {
+        fprintf(stderr, "[WEB] socket create failed\n");
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return;
+    }
+
+    int opt = 1;
+    setsockopt(g_server_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(SERVER_PORT);
+
+    if (bind(g_server_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[WEB] bind failed\n");
+        close_socket_safe(g_server_socket);
+        g_server_socket = -1;
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return;
+    }
+
+    if (listen(g_server_socket, 16) < 0) {
+        fprintf(stderr, "[WEB] listen failed\n");
+        close_socket_safe(g_server_socket);
+        g_server_socket = -1;
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return;
+    }
+
+    printf("[WEB] listening on :%d\n", SERVER_PORT);
+
+    while (g_system_running) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_sock = accept(g_server_socket, (struct sockaddr*)&client_addr, &client_len);
+        if (client_sock < 0) {
+            if (!g_system_running) {
+                break;
+            }
+            continue;
+        }
+
+        int* sock_arg = (int*)malloc(sizeof(int));
+        if (!sock_arg) {
+            close_socket_safe(client_sock);
+            continue;
+        }
+        *sock_arg = client_sock;
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, sock_arg) == 0) {
+            pthread_detach(tid);
+        } else {
+            free(sock_arg);
+            close_socket_safe(client_sock);
+        }
+    }
+
+    stop_web_server();
+}
+
+void stop_web_server(void) {
+    if (g_server_socket >= 0) {
+        close_socket_safe(g_server_socket);
+        g_server_socket = -1;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }

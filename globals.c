@@ -1,8 +1,8 @@
 #include "global_vars.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h> // ✅ 修复：添加 memset 所需的头文件
-#include <time.h>   // ✅ 修复：添加 time() 所需的头文件
+#include <string.h>
+#include <time.h>
 #include <stdbool.h>
 
 // ==========================================================
@@ -21,6 +21,7 @@ SystemState g_system_state;
 int g_total_climbed = 0;
 int g_current_floor = 1;
 float g_speed_per_minute = 0.0f;
+int g_max_floors = MAX_FLOORS;
 
 // 4. 控制标志
 volatile bool g_system_running = false;
@@ -38,36 +39,30 @@ volatile bool g_reset_requested = false;
 void init_globals(void) {
     printf("[INIT] 正在初始化全局变量...\n");
 
-    // 1. 初始化所有用户数据
     for (int i = 0; i < MAX_USERS; i++) {
         g_users[i].user_id = i;
-
-        // 初始化用户名为 "Guest_X"
         snprintf(g_users[i].username, USERNAME_LEN, "Guest_%d", i);
+        snprintf(g_users[i].device_id, DEVICE_ID_LEN, "DEV_%03d", i);
 
         g_users[i].current_floor = 1;
         g_users[i].total_steps = 0;
         g_users[i].speed_per_minute = 0.0f;
-
-        // ✅ 修复：仅当 User 结构体中有 data_buffer 成员时才初始化它
-        // 如果编译报错说 'data_buffer' 不存在，请注释掉下面这行，并在 global_vars.h 中检查结构体定义
-        #ifdef HAS_USER_DATA_BUFFER
+        g_users[i].sent_lines = 0;
+        g_users[i].buffer_index = 0;
         memset(g_users[i].data_buffer, 0, sizeof(g_users[i].data_buffer));
-        #endif
+        pthread_mutex_init(&g_users[i].mutex, NULL);
     }
 
-    // 2. 初始化系统状态
     g_system_state.simulation_running = false;
     g_system_state.reset_requested = false;
-    g_system_state.start_time = time(NULL); // ✅ 修复：使用 time() 获取当前时间
+    g_system_state.start_time = 0;
 
-    // 3. 初始化全局统计
     g_total_climbed = 0;
     g_current_floor = 1;
     g_speed_per_minute = 0.0f;
+    g_max_floors = MAX_FLOORS;
 
-    // 4. 重置控制标志
-    g_system_running = false;
+    g_system_running = true;
     g_reset_requested = false;
 
     printf("[OK] 全局变量初始化完成。\n");
