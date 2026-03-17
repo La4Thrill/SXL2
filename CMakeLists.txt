@@ -21,6 +21,7 @@ add_executable(server
 target_link_libraries(server PRIVATE
         Threads::Threads
         ws2_32
+        winmm
 )
 
 # 可选：启用详细输出便于调试
