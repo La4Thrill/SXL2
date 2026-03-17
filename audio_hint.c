@@ -8,12 +8,19 @@
 #pragma comment(lib, "winmm.lib")
 #endif
 
-// 【正确】新版本
-void check_audio_hint(int current_floor, int total_climbed) {
+static int g_last_floor_hint = 0;
+static int g_top_floor_notified = 0;
 
-    // 每15阶提示一次
-    if (total_climbed > 0 && total_climbed % 15 == 0) {
-        printf("🔊 [提示音] 已攀爬 %d 阶，请继续加油！\n", total_climbed);
+void check_audio_hint(int current_floor, int total_climbed) {
+    if (current_floor < g_last_floor_hint) {
+        g_last_floor_hint = 0;
+        g_top_floor_notified = 0;
+    }
+
+    // 每15层提示一次（15/30/45/...），并确保每个目标楼层只提示一次
+    if (current_floor >= 15 && current_floor % 15 == 0 && current_floor != g_last_floor_hint) {
+        g_last_floor_hint = current_floor;
+        printf("[AUDIO] Reached floor %d. Keep going!\n", current_floor);
     #ifdef _WIN32
         PlaySound(TEXT("SystemAsterisk"), NULL, SND_ALIAS | SND_ASYNC);
     #else
@@ -21,9 +28,10 @@ void check_audio_hint(int current_floor, int total_climbed) {
     #endif
     }
 
-    // 到达顶层提示
-    if (current_floor >= MAX_FLOORS) {
-        printf("🎉 [恭喜] 成功登顶 %d 层！总步数：%d\n", current_floor, total_climbed);
+    // 到达顶层提示（只提示一次）
+    if (current_floor >= MAX_FLOORS && !g_top_floor_notified) {
+        g_top_floor_notified = 1;
+        printf("[AUDIO] Reached top floor %d. Total steps: %d\n", current_floor, total_climbed);
     #ifdef _WIN32
         PlaySound(TEXT("SystemExclamation"), NULL, SND_ALIAS | SND_ASYNC);
     #else
@@ -31,6 +39,3 @@ void check_audio_hint(int current_floor, int total_climbed) {
     #endif
     }
 }
-
-// 推荐：将此逻辑直接放回 simulator.c 的锁内部，或者修改函数签名
-// void check_and_hint(User *u) { ... }

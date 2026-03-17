@@ -37,7 +37,7 @@ volatile bool g_reset_requested = false;
  * 应在 main 函数开始时调用。
  */
 void init_globals(void) {
-    printf("[INIT] 正在初始化全局变量...\n");
+    printf("[INIT] Initializing global variables...\n");
 
     for (int i = 0; i < MAX_USERS; i++) {
         g_users[i].user_id = i;
@@ -65,7 +65,7 @@ void init_globals(void) {
     g_system_running = true;
     g_reset_requested = false;
 
-    printf("[OK] 全局变量初始化完成。\n");
+    printf("[OK] Global initialization complete.\n");
 }
 
 /**
@@ -75,7 +75,7 @@ void init_globals(void) {
  */
 void request_reset(void) {
     g_reset_requested = true;
-    printf("[INFO] 已收到重置请求。\n");
+    printf("[INFO] Reset requested.\n");
 }
 
 /**
