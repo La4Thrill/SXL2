@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SXL2 终端模拟端</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #111827;
+            --card: #1f2937;
+            --line: #374151;
+            --text: #e5e7eb;
+            --ok: #22c55e;
+            --danger: #ef4444;
+            --primary: #3b82f6;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Arial, sans-serif;
+            padding: 14px;
+        }
+
+        .shell {
+            max-width: 1120px;
+            margin: 0 auto;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: var(--panel);
+            overflow: hidden;
+        }
+
+        .title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #0b1220;
+            border-bottom: 1px solid var(--line);
+            padding: 10px 12px;
+            font-weight: 600;
+        }
+
+        .row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            gap: 10px;
+            padding: 10px;
+        }
+
+        .left, .right {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--card);
+            min-height: 420px;
+            padding: 10px;
+        }
+
+        .left h4, .right h4 { margin: 0 0 10px 0; }
+
+        .btn {
+            width: 100%;
+            margin-bottom: 8px;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            font-weight: 600;
+            padding: 10px;
+            cursor: pointer;
+        }
+
+        .btn-primary { background: var(--primary); }
+        .btn-ok { background: var(--ok); }
+        .btn-danger { background: var(--danger); }
+        .btn-gray { background: #6b7280; }
+
+        input, select {
+            background: #0f172a;
+            border: 1px solid var(--line);
+            color: var(--text);
+            border-radius: 6px;
+            padding: 8px;
+        }
+
+        .kv {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(90px, 1fr));
+            gap: 8px;
+        }
+
+        .item {
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            padding: 8px;
+            text-align: center;
+            background: #0b1220;
+        }
+
+        .item .k { font-size: 12px; color: #9ca3af; }
+        .item .v { font-size: 22px; font-weight: 700; margin-top: 4px; }
+
+        .ok { color: var(--ok); }
+        .stop { color: var(--danger); }
+
+        #log {
+            width: 100%;
+            height: 170px;
+            border-radius: 6px;
+            border: 1px solid var(--line);
+            background: #020617;
+            color: #86efac;
+            padding: 8px;
+            resize: vertical;
+            font-family: Consolas, monospace;
+            font-size: 12px;
+        }
+
+        .hint {
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 0 12px 10px 12px;
+        }
+
+        a { color: #93c5fd; text-decoration: none; }
+
+        @media (max-width: 900px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="shell">
+    <div class="title">
+        <span>终端模拟端（独立界面）</span>
+        <span>主界面：<a href="/">/index.html</a></span>
+    </div>
+
+    <div class="row">
+        <input id="username" placeholder="用户名" value="admin">
+        <input id="password" type="password" placeholder="密码" value="admin123">
+        <button class="btn btn-primary" style="width:auto;padding:8px 14px;" onclick="login()">登录</button>
+        <span id="authState">未登录</span>
+    </div>
+
+    <div class="row">
+        <label>场景：</label>
+        <select id="profile">
+            <option value="mixed">mixed（data1+data2）</option>
+            <option value="upstairs3">upstairs3（data1）</option>
+        </select>
+        <span>状态：<b id="runState" class="stop">已停止</b></span>
+    </div>
+
+    <div class="grid">
+        <div class="left">
+            <h4>控制区</h4>
+            <button class="btn btn-primary" onclick="loadProfile()">加载文件</button>
+            <button class="btn btn-ok" onclick="sendCmd('start')">开始</button>
+            <button class="btn btn-danger" onclick="sendCmd('stop')">停止</button>
+            <button class="btn btn-gray" onclick="sendCmd('reset')">重置</button>
+            <button class="btn btn-primary" onclick="refreshStatus()">刷新状态</button>
+        </div>
+
+        <div class="right">
+            <h4>运行信息</h4>
+            <div class="kv">
+                <div class="item"><div class="k">当前楼层</div><div class="v" id="floor">--</div></div>
+                <div class="item"><div class="k">已爬楼层</div><div class="v" id="climbed">--</div></div>
+                <div class="item"><div class="k">总步数</div><div class="v" id="steps">--</div></div>
+                <div class="item"><div class="k">样本行数</div><div class="v" id="lines">--</div></div>
+            </div>
+            <h4 style="margin-top:12px;">实时日志</h4>
+            <textarea id="log" readonly></textarea>
+        </div>
+    </div>
+
+    <div class="hint">默认账号：admin/admin123、monitor1/monitor123（采集用户无控制权限）。</div>
+</div>
+
+<script>
+    let token = '';
+    let timer = null;
+    let refreshing = false;
+    let lastSnapshot = { floor: null, steps: null, lines: null, running: null };
+
+    function appendLog(line) {
+        const el = document.getElementById('log');
+        const now = new Date().toLocaleTimeString();
+        el.value += `[${now}] ${line}\n`;
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function withAuthHeaders(extra = {}) {
+        const headers = { ...extra };
+        if (token) headers['X-Auth-Token'] = token;
+        return headers;
+    }
+
+    async function login() {
+        const username = document.getElementById('username').value.trim();
+        const password = document.getElementById('password').value;
+        const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+
+        if (!res.ok) {
+            document.getElementById('authState').textContent = '登录失败';
+            appendLog('登录失败，请检查账号密码');
+            return;
+        }
+
+        const data = await res.json();
+        token = data.token || '';
+        document.getElementById('authState').textContent = `已登录：${data.username} (${data.role})`;
+        appendLog(`登录成功：${data.username} / ${data.role}`);
+        await refreshStatus();
+
+        if (timer) clearInterval(timer);
+        timer = setInterval(refreshStatus, 1000);
+    }
+
+    async function loadProfile() {
+        const profile = document.getElementById('profile').value;
+        const res = await fetch('/api/sim/load', {
+            method: 'POST',
+            headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ profile })
+        });
+
+        if (!res.ok) {
+            appendLog('加载场景失败（权限不足或参数错误）');
+            return;
+        }
+        const data = await res.json();
+        appendLog(`场景已加载：${data.profile}`);
+        await refreshStatus();
+    }
+
+    async function sendCmd(cmd) {
+        const res = await fetch('/' + cmd, {
+            method: 'POST',
+            headers: withAuthHeaders()
+        });
+        if (!res.ok) {
+            appendLog(`命令失败：${cmd}`);
+            return;
+        }
+        appendLog(`命令执行成功：${cmd}`);
+        await refreshStatus();
+    }
+
+    async function refreshStatus() {
+        if (!token || refreshing) return;
+        refreshing = true;
+
+        try {
+            const res = await fetch('/api/status?t=' + Date.now(), {
+                headers: withAuthHeaders()
+            });
+
+            if (res.status === 401) {
+                appendLog('会话已失效，请重新登录');
+                document.getElementById('authState').textContent = '会话失效';
+                token = '';
+                if (timer) {
+                    clearInterval(timer);
+                    timer = null;
+                }
+                return;
+            }
+
+            if (!res.ok) {
+                appendLog('状态刷新失败：HTTP ' + res.status);
+                return;
+            }
+
+            const data = await res.json();
+            document.getElementById('floor').textContent = data.current_floor ?? '--';
+            document.getElementById('climbed').textContent = data.climbed_floors ?? '--';
+            document.getElementById('steps').textContent = data.steps ?? '--';
+            document.getElementById('lines').textContent = data.file_lines ?? '--';
+
+            const stateEl = document.getElementById('runState');
+            if (data.running) {
+                stateEl.textContent = '运行中';
+                stateEl.className = 'ok';
+            } else {
+                stateEl.textContent = '已停止';
+                stateEl.className = 'stop';
+            }
+
+            const changed =
+                lastSnapshot.floor !== data.current_floor ||
+                lastSnapshot.steps !== data.steps ||
+                lastSnapshot.lines !== data.file_lines ||
+                lastSnapshot.running !== data.running;
+
+            if (changed) {
+                appendLog(`状态更新 floor=${data.current_floor} steps=${data.steps} lines=${data.file_lines} running=${data.running}`);
+                lastSnapshot = {
+                    floor: data.current_floor,
+                    steps: data.steps,
+                    lines: data.file_lines,
+                    running: data.running
+                };
+            }
+        } catch (err) {
+            appendLog('状态刷新异常：' + (err && err.message ? err.message : err));
+        } finally {
+            refreshing = false;
+        }
+    }
+</script>
+</body>
+</html>

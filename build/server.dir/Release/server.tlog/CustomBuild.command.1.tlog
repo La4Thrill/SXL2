@@ -1,6 +1,6 @@
-^C:\USERS\ADMINISTRATOR\DESKTOP\LYM\SXL2\CMAKELISTS.TXT
+^C:\USERS\ADMINISTRATOR\DESKTOP\LYTM\SXL2\CMAKELISTS.TXT
 setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/Administrator/Desktop/lym/SXL2 -BC:/Users/Administrator/Desktop/lym/SXL2/build --check-stamp-file C:/Users/Administrator/Desktop/lym/SXL2/build/CMakeFiles/generate.stamp
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/Administrator/Desktop/lytm/SXL2 -BC:/Users/Administrator/Desktop/lytm/SXL2/build --check-stamp-file C:/Users/Administrator/Desktop/lytm/SXL2/build/CMakeFiles/generate.stamp
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

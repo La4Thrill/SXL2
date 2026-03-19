@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -21,9 +22,23 @@
 #endif
 
 #define SERVER_PORT 8080
-#define HTTP_BUFFER_SIZE 8192
+#define HTTP_BUFFER_SIZE 16384
+#define MAX_SESSIONS 64
+#define TOKEN_LEN 64
+#define SESSION_TTL_SECONDS 43200
+
+typedef struct {
+    bool active;
+    char token[TOKEN_LEN + 1];
+    char username[64];
+    char role[16];
+    time_t expires_at;
+} Session;
 
 static int g_server_socket = -1;
+static Session g_sessions[MAX_SESSIONS];
+static pthread_mutex_t g_session_mutex;
+static bool g_session_mutex_inited = false;
 
 static FILE* open_text_with_fallback(const char* path) {
     FILE* fp = fopen(path, "rb");
@@ -67,6 +82,8 @@ static void send_text_response(int client_sock, const char* status, const char* 
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
         "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Headers: Content-Type, X-Auth-Token\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n",
         status, content_type, len);
@@ -85,10 +102,10 @@ static void send_json_response(int client_sock, const char* status, cJSON* root)
     }
 }
 
-static void serve_index_html(int client_sock) {
-    FILE* fp = open_text_with_fallback("index.html");
+static void serve_html_file(int client_sock, const char* file_name) {
+    FILE* fp = open_text_with_fallback(file_name);
     if (!fp) {
-        send_text_response(client_sock, "404 Not Found", "text/plain", "index.html not found");
+        send_text_response(client_sock, "404 Not Found", "text/plain", "html file not found");
         return;
     }
 
@@ -117,33 +134,281 @@ static void serve_index_html(int client_sock) {
     free(content);
 }
 
-static void handle_get(int client_sock, const char* path) {
+static void serve_index_html(int client_sock) {
+    serve_html_file(client_sock, "index.html");
+}
+
+static void serve_terminal_html(int client_sock) {
+    serve_html_file(client_sock, "terminal.html");
+}
+
+static void generate_token(char* out, size_t out_len) {
+    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    size_t alpha_len = strlen(alphabet);
+
+    if (!out || out_len < TOKEN_LEN + 1) {
+        return;
+    }
+
+    for (size_t i = 0; i < TOKEN_LEN; ++i) {
+        out[i] = alphabet[rand() % alpha_len];
+    }
+    out[TOKEN_LEN] = '\0';
+}
+
+static void create_session(const char* username, const char* role, char* out_token, size_t out_len) {
+    if (!username || !role || !out_token || out_len < TOKEN_LEN + 1) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_session_mutex);
+
+    int slot = -1;
+    time_t now = time(NULL);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (!g_sessions[i].active || g_sessions[i].expires_at <= now) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        slot = 0;
+    }
+
+    generate_token(g_sessions[slot].token, sizeof(g_sessions[slot].token));
+    snprintf(g_sessions[slot].username, sizeof(g_sessions[slot].username), "%s", username);
+    snprintf(g_sessions[slot].role, sizeof(g_sessions[slot].role), "%s", role);
+    g_sessions[slot].expires_at = now + SESSION_TTL_SECONDS;
+    g_sessions[slot].active = true;
+
+    snprintf(out_token, out_len, "%s", g_sessions[slot].token);
+
+    pthread_mutex_unlock(&g_session_mutex);
+}
+
+static bool get_session(const char* token, Session* out_session) {
+    if (!token || !token[0]) {
+        return false;
+    }
+
+    pthread_mutex_lock(&g_session_mutex);
+
+    bool found = false;
+    time_t now = time(NULL);
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (!g_sessions[i].active) {
+            continue;
+        }
+        if (g_sessions[i].expires_at <= now) {
+            g_sessions[i].active = false;
+            continue;
+        }
+        if (strcmp(g_sessions[i].token, token) == 0) {
+            if (out_session) {
+                *out_session = g_sessions[i];
+            }
+            found = true;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_session_mutex);
+    return found;
+}
+
+static bool has_role(const Session* session, const char* role_a, const char* role_b) {
+    if (!session) {
+        return false;
+    }
+    if (role_a && strcmp(session->role, role_a) == 0) {
+        return true;
+    }
+    if (role_b && strcmp(session->role, role_b) == 0) {
+        return true;
+    }
+    return false;
+}
+
+static void read_header_value(const char* req, const char* key, char* out, size_t out_len) {
+    if (!req || !key || !out || out_len == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    const char* p = strstr(req, key);
+    if (!p) {
+        return;
+    }
+
+    p += strlen(key);
+    while (*p == ' ') {
+        p++;
+    }
+
+    size_t idx = 0;
+    while (*p && *p != '\r' && *p != '\n' && idx + 1 < out_len) {
+        out[idx++] = *p++;
+    }
+    out[idx] = '\0';
+}
+
+static int get_content_length(const char* req) {
+    char buf[32] = {0};
+    read_header_value(req, "Content-Length:", buf, sizeof(buf));
+    if (!buf[0]) {
+        return 0;
+    }
+    int len = atoi(buf);
+    return len > 0 ? len : 0;
+}
+
+static const char* get_json_body(const char* req) {
+    const char* body = strstr(req, "\r\n\r\n");
+    if (!body) {
+        return NULL;
+    }
+    return body + 4;
+}
+
+static void extract_field_fuzzy(const char* body, const char* key, char* out, size_t out_len) {
+    if (!body || !key || !out || out_len == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    const char* p = strstr(body, key);
+    if (!p) {
+        return;
+    }
+
+    p = strchr(p, ':');
+    if (!p) {
+        return;
+    }
+    p++;
+
+    while (*p == ' ' || *p == '\t' || *p == '"' || *p == '\'' || *p == '\\') {
+        p++;
+    }
+
+    size_t idx = 0;
+    while (*p && idx + 1 < out_len) {
+        if (*p == '"' || *p == '\'' || *p == ',' || *p == '}' || *p == '\\' || *p == '\r' || *p == '\n') {
+            break;
+        }
+        out[idx++] = *p++;
+    }
+    out[idx] = '\0';
+}
+
+static void add_wave_array(cJSON* root, const char* key, const float* buffer, int start_idx) {
+    cJSON* arr = cJSON_CreateArray();
+    for (int i = 0; i < DATA_BUFFER_SIZE; ++i) {
+        int idx = (start_idx + i) % DATA_BUFFER_SIZE;
+        cJSON_AddItemToArray(arr, cJSON_CreateNumber(buffer[idx]));
+    }
+    cJSON_AddItemToObject(root, key, arr);
+}
+
+static bool require_auth(int client_sock, const Session* session) {
+    if (session) {
+        return true;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "error", "unauthorized");
+    send_json_response(client_sock, "401 Unauthorized", root);
+    cJSON_Delete(root);
+    return false;
+}
+
+static bool require_role_monitor_or_admin(int client_sock, const Session* session) {
+    if (session && has_role(session, "admin", "monitor")) {
+        return true;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "error", "forbidden");
+    cJSON_AddStringToObject(root, "message", "requires role admin or monitor");
+    send_json_response(client_sock, "403 Forbidden", root);
+    cJSON_Delete(root);
+    return false;
+}
+
+static void handle_get(int client_sock, const char* path, const Session* session) {
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         serve_index_html(client_sock);
         return;
     }
 
-    if (strncmp(path, "/api/status", 11) == 0) {
+    if (strcmp(path, "/terminal") == 0 || strcmp(path, "/terminal.html") == 0) {
+        serve_terminal_html(client_sock);
+        return;
+    }
+
+    if (strcmp(path, "/api/session") == 0) {
+        if (!require_auth(client_sock, session)) {
+            return;
+        }
+
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "username", session->username);
+        cJSON_AddStringToObject(root, "role", session->role);
+        send_json_response(client_sock, "200 OK", root);
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(path, "/api/collectors") == 0) {
+        if (!require_auth(client_sock, session)) {
+            return;
+        }
+
+        char* users = get_collectors_json();
+        send_text_response(client_sock, "200 OK", "application/json", users ? users : "[]");
+        if (users) {
+            free(users);
+        }
+        return;
+    }
+
+    if (strcmp(path, "/api/status") == 0) {
+        if (!require_auth(client_sock, session)) {
+            return;
+        }
+
         cJSON* root = cJSON_CreateObject();
 
+        User snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
         pthread_mutex_lock(&g_users[0].mutex);
-        cJSON_AddStringToObject(root, "user", g_users[0].username);
-        cJSON_AddStringToObject(root, "device_id", g_users[0].device_id);
-        cJSON_AddNumberToObject(root, "current_floor", g_users[0].current_floor);
-        cJSON_AddNumberToObject(root, "climbed", g_users[0].total_steps);
-        cJSON_AddNumberToObject(root, "speed", g_users[0].speed_per_minute);
-        cJSON_AddNumberToObject(root, "file_lines", g_users[0].sent_lines);
+        snapshot = g_users[0];
         pthread_mutex_unlock(&g_users[0].mutex);
 
+        cJSON_AddStringToObject(root, "username", snapshot.username);
+        cJSON_AddStringToObject(root, "device_id", snapshot.device_id);
+        cJSON_AddNumberToObject(root, "current_floor", snapshot.current_floor);
+        cJSON_AddNumberToObject(root, "climbed_floors", snapshot.current_floor > 1 ? (snapshot.current_floor - 1) : 0);
+        cJSON_AddNumberToObject(root, "steps", snapshot.total_steps);
+        cJSON_AddNumberToObject(root, "speed", snapshot.speed_per_minute);
+        cJSON_AddNumberToObject(root, "file_lines", snapshot.sent_lines);
         cJSON_AddBoolToObject(root, "running", sim_is_running());
         cJSON_AddNumberToObject(root, "max_floors", g_max_floors);
+        cJSON_AddStringToObject(root, "profile", sim_get_profile());
+
+        add_wave_array(root, "accel_wave", snapshot.accel_buffer, snapshot.buffer_index);
+        add_wave_array(root, "gyro_wave", snapshot.gyro_buffer, snapshot.buffer_index);
 
         send_json_response(client_sock, "200 OK", root);
         cJSON_Delete(root);
         return;
     }
 
-    if (strncmp(path, "/api/history", 12) == 0) {
+    if (strcmp(path, "/api/history") == 0) {
+        if (!require_auth(client_sock, session)) {
+            return;
+        }
+
         char* json = get_recent_history_json(10);
         send_text_response(client_sock, "200 OK", "application/json", json ? json : "[]");
         if (json) {
@@ -153,6 +418,10 @@ static void handle_get(int client_sock, const char* path) {
     }
 
     if (strcmp(path, "/api/reset") == 0) {
+        if (!require_role_monitor_or_admin(client_sock, session)) {
+            return;
+        }
+
         g_reset_requested = true;
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "status", "reset_requested");
@@ -164,26 +433,126 @@ static void handle_get(int client_sock, const char* path) {
     send_text_response(client_sock, "404 Not Found", "application/json", "{\"error\":\"not found\"}");
 }
 
-static void handle_post(int client_sock, const char* path) {
-    cJSON* root = cJSON_CreateObject();
+static void handle_post(int client_sock, const char* path, const char* req_body, const Session* session) {
+    if (strcmp(path, "/api/login") == 0) {
+        cJSON* payload = req_body ? cJSON_Parse(req_body) : NULL;
+        const cJSON* j_user = payload ? cJSON_GetObjectItemCaseSensitive(payload, "username") : NULL;
+        const cJSON* j_pass = payload ? cJSON_GetObjectItemCaseSensitive(payload, "password") : NULL;
+
+        char username_buf[64] = {0};
+        char password_buf[64] = {0};
+
+        if (cJSON_IsString(j_user) && j_user->valuestring) {
+            snprintf(username_buf, sizeof(username_buf), "%s", j_user->valuestring);
+        }
+        if (cJSON_IsString(j_pass) && j_pass->valuestring) {
+            snprintf(password_buf, sizeof(password_buf), "%s", j_pass->valuestring);
+        }
+
+        if (!username_buf[0] || !password_buf[0]) {
+            extract_field_fuzzy(req_body, "username", username_buf, sizeof(username_buf));
+            extract_field_fuzzy(req_body, "password", password_buf, sizeof(password_buf));
+        }
+
+        const char* username = username_buf[0] ? username_buf : NULL;
+        const char* password = password_buf[0] ? password_buf : NULL;
+
+        cJSON* root = cJSON_CreateObject();
+        AuthAccount account;
+        memset(&account, 0, sizeof(account));
+
+        if (verify_login(username, password, &account)) {
+            char token[TOKEN_LEN + 1] = {0};
+            create_session(account.username, account.role, token, sizeof(token));
+
+            cJSON_AddStringToObject(root, "status", "ok");
+            cJSON_AddStringToObject(root, "token", token);
+            cJSON_AddStringToObject(root, "username", account.username);
+            cJSON_AddStringToObject(root, "role", account.role);
+            cJSON_AddStringToObject(root, "nickname", account.nickname);
+            send_json_response(client_sock, "200 OK", root);
+        } else {
+            cJSON_AddStringToObject(root, "status", "error");
+            cJSON_AddStringToObject(root, "message", "invalid credentials");
+            send_json_response(client_sock, "401 Unauthorized", root);
+        }
+
+        cJSON_Delete(root);
+        if (payload) {
+            cJSON_Delete(payload);
+        }
+        return;
+    }
+
+    if (strcmp(path, "/api/sim/load") == 0) {
+        if (!require_role_monitor_or_admin(client_sock, session)) {
+            return;
+        }
+
+        cJSON* payload = req_body ? cJSON_Parse(req_body) : NULL;
+        const cJSON* j_profile = payload ? cJSON_GetObjectItemCaseSensitive(payload, "profile") : NULL;
+        const char* profile = cJSON_IsString(j_profile) ? j_profile->valuestring : NULL;
+
+        cJSON* root = cJSON_CreateObject();
+        if (sim_load_profile(profile)) {
+            cJSON_AddStringToObject(root, "status", "loaded");
+            cJSON_AddStringToObject(root, "profile", sim_get_profile());
+            send_json_response(client_sock, "200 OK", root);
+        } else {
+            cJSON_AddStringToObject(root, "status", "error");
+            cJSON_AddStringToObject(root, "message", "invalid profile, use mixed or upstairs3");
+            send_json_response(client_sock, "400 Bad Request", root);
+        }
+
+        cJSON_Delete(root);
+        if (payload) {
+            cJSON_Delete(payload);
+        }
+        return;
+    }
 
     if (strcmp(path, "/start") == 0) {
+        if (!require_role_monitor_or_admin(client_sock, session)) {
+            return;
+        }
+
+        cJSON* root = cJSON_CreateObject();
         sim_start();
         cJSON_AddStringToObject(root, "status", "started");
         send_json_response(client_sock, "200 OK", root);
-    } else if (strcmp(path, "/stop") == 0) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(path, "/stop") == 0) {
+        if (!require_role_monitor_or_admin(client_sock, session)) {
+            return;
+        }
+
+        cJSON* root = cJSON_CreateObject();
         sim_stop();
         cJSON_AddStringToObject(root, "status", "stopped");
         send_json_response(client_sock, "200 OK", root);
-    } else if (strcmp(path, "/reset") == 0) {
-        g_reset_requested = true;
-        cJSON_AddStringToObject(root, "status", "reset_requested");
-        send_json_response(client_sock, "200 OK", root);
-    } else {
-        cJSON_AddStringToObject(root, "error", "not found");
-        send_json_response(client_sock, "404 Not Found", root);
+        cJSON_Delete(root);
+        return;
     }
 
+    if (strcmp(path, "/reset") == 0) {
+        if (!require_role_monitor_or_admin(client_sock, session)) {
+            return;
+        }
+
+        g_reset_requested = true;
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "status", "reset_requested");
+        send_json_response(client_sock, "200 OK", root);
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "error", "not found");
+    send_json_response(client_sock, "404 Not Found", root);
     cJSON_Delete(root);
 }
 
@@ -194,10 +563,36 @@ static void* handle_client(void* arg) {
     char buffer[HTTP_BUFFER_SIZE];
     memset(buffer, 0, sizeof(buffer));
 
-    int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
-    if (bytes <= 0) {
+    int total_bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+    if (total_bytes <= 0) {
         close_socket_safe(client_sock);
         return NULL;
+    }
+    buffer[total_bytes] = '\0';
+
+    char* header_end = strstr(buffer, "\r\n\r\n");
+    while (!header_end && total_bytes < (int)sizeof(buffer) - 1) {
+        int got = recv(client_sock, buffer + total_bytes, (int)sizeof(buffer) - 1 - total_bytes, 0);
+        if (got <= 0) {
+            break;
+        }
+        total_bytes += got;
+        buffer[total_bytes] = '\0';
+        header_end = strstr(buffer, "\r\n\r\n");
+    }
+
+    int content_len = get_content_length(buffer);
+    if (header_end && content_len > 0) {
+        int header_size = (int)((header_end + 4) - buffer);
+        int expected_total = header_size + content_len;
+        while (total_bytes < expected_total && total_bytes < (int)sizeof(buffer) - 1) {
+            int got = recv(client_sock, buffer + total_bytes, (int)sizeof(buffer) - 1 - total_bytes, 0);
+            if (got <= 0) {
+                break;
+            }
+            total_bytes += got;
+            buffer[total_bytes] = '\0';
+        }
     }
 
     char method[8] = {0};
@@ -209,10 +604,20 @@ static void* handle_client(void* arg) {
         *q = '\0';
     }
 
+    char token[128] = {0};
+    read_header_value(buffer, "X-Auth-Token:", token, sizeof(token));
+
+    Session session;
+    Session* session_ptr = NULL;
+    if (get_session(token, &session)) {
+        session_ptr = &session;
+    }
+
     if (strcmp(method, "GET") == 0) {
-        handle_get(client_sock, path);
+        handle_get(client_sock, path, session_ptr);
     } else if (strcmp(method, "POST") == 0) {
-        handle_post(client_sock, path);
+        const char* body = get_json_body(buffer);
+        handle_post(client_sock, path, body, session_ptr);
     } else if (strcmp(method, "OPTIONS") == 0) {
         send_text_response(client_sock, "200 OK", "text/plain", "");
     } else {
@@ -231,6 +636,13 @@ void start_web_server(void) {
         return;
     }
 #endif
+
+    srand((unsigned int)time(NULL));
+
+    if (!g_session_mutex_inited) {
+        pthread_mutex_init(&g_session_mutex, NULL);
+        g_session_mutex_inited = true;
+    }
 
     g_server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (g_server_socket < 0) {

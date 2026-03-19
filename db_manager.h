@@ -3,6 +3,16 @@
 
 #include <stdbool.h>
 
+#define DB_AUTH_USERNAME_LEN 64
+#define DB_AUTH_ROLE_LEN 16
+
+typedef struct {
+	int id;
+	char username[DB_AUTH_USERNAME_LEN];
+	char role[DB_AUTH_ROLE_LEN];
+	char nickname[64];
+} AuthAccount;
+
 // ==========================================================
 // 🗄️ 数据库管理模块 - 头文件
 // ==========================================================
@@ -47,6 +57,16 @@ bool load_progress(int user_id, int* out_floor, int* out_steps, float* out_speed
  * @brief 获取最近历史记录 JSON 数组字符串（调用方负责 free）
  */
 char* get_recent_history_json(int limit);
+
+/**
+ * @brief 校验登录账号密码
+ */
+bool verify_login(const char* username, const char* password, AuthAccount* out_account);
+
+/**
+ * @brief 获取所有采集对象用户列表 JSON（role=user）
+ */
+char* get_collectors_json(void);
 
 // 兼容旧代码命名
 int db_init(void);

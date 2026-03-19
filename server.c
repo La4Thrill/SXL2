@@ -21,8 +21,7 @@ int main(void) {
         fprintf(stderr, "[BOOT] database init failed, continue without persistence.\n");
     }
 
-    const char* files[] = {"data1.txt", "data2.txt"};
-    sim_set_data_files(files, 2, true);
+    sim_load_profile("mixed");
 
     pthread_t sim_thread;
     if (pthread_create(&sim_thread, NULL, simulator_thread_func, NULL) != 0) {
@@ -31,7 +30,6 @@ int main(void) {
         return 1;
     }
 
-    sim_start();
     start_web_server();
 
     g_system_running = false;

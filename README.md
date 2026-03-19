@@ -85,12 +85,27 @@
 
 ## 5. API 说明（当前版本）
 - `GET /`：返回 Web 页面
+- `POST /api/login`：登录，参数：`username`、`password`
+- `GET /api/session`：获取当前登录会话信息
+- `GET /api/collectors`：获取采集对象列表（支持多个用户）
 - `GET /api/status`：实时状态
-  - 返回字段：`user`、`device_id`、`current_floor`、`climbed`、`speed`、`file_lines`、`running`、`max_floors`
+  - 返回字段：`username`、`device_id`、`current_floor`、`climbed_floors`、`steps`、`speed`、`file_lines`、`running`、`max_floors`、`profile`
+  - 波形字段：`accel_wave`（加速度波形）、`gyro_wave`（角速度波形）
 - `GET /api/history`：最近历史记录
+- `POST /api/sim/load`：加载模拟场景，参数：`profile=mixed|upstairs3`
 - `POST /start`：启动模拟
 - `POST /stop`：停止模拟
 - `POST /reset`：重置状态并重新开始采样
+
+## 5.1 默认登录账号
+- 管理员：admin / admin123
+- 监控人员：monitor1 / monitor123
+- 采集对象：collector1 / collector123（另含 collector2）
+
+角色说明：
+- admin：全权限
+- monitor：可加载场景、开始/停止/重置、监控多采集对象
+- user：可查看监测数据与历史记录
 
 ## 6. 构建与运行
 在项目上层目录执行（当前工程在 `SXL2/`）：

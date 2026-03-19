@@ -42,6 +42,7 @@ void init_globals(void) {
     for (int i = 0; i < MAX_USERS; i++) {
         g_users[i].user_id = i;
         snprintf(g_users[i].username, USERNAME_LEN, "Guest_%d", i);
+        snprintf(g_users[i].role, ROLE_LEN, "user");
         snprintf(g_users[i].device_id, DEVICE_ID_LEN, "DEV_%03d", i);
 
         g_users[i].current_floor = 1;
@@ -49,7 +50,8 @@ void init_globals(void) {
         g_users[i].speed_per_minute = 0.0f;
         g_users[i].sent_lines = 0;
         g_users[i].buffer_index = 0;
-        memset(g_users[i].data_buffer, 0, sizeof(g_users[i].data_buffer));
+        memset(g_users[i].accel_buffer, 0, sizeof(g_users[i].accel_buffer));
+        memset(g_users[i].gyro_buffer, 0, sizeof(g_users[i].gyro_buffer));
         pthread_mutex_init(&g_users[i].mutex, NULL);
     }
 

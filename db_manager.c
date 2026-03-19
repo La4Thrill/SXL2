@@ -75,6 +75,17 @@ int init_database(void) {
         "created_at INTEGER NOT NULL"
         ");";
 
+    const char* sql_auth =
+        "CREATE TABLE IF NOT EXISTS auth_accounts ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "username TEXT NOT NULL UNIQUE,"
+        "password TEXT NOT NULL,"
+        "role TEXT NOT NULL CHECK(role IN ('admin','user','monitor')),"
+        "nickname TEXT"
+        ");";
+
+    const char* sql_drop_auth = "DROP TABLE IF EXISTS auth_accounts;";
+
     const char* sql_idx1 = "CREATE INDEX IF NOT EXISTS idx_history_user_time ON history_records(user_id, created_at DESC);";
     const char* sql_idx2 = "CREATE INDEX IF NOT EXISTS idx_results_user_time ON analysis_results(user_id, created_at DESC);";
 
@@ -83,8 +94,21 @@ int init_database(void) {
         exec_sql(sql_raw) != SQLITE_OK ||
         exec_sql(sql_results) != SQLITE_OK ||
         exec_sql(sql_history) != SQLITE_OK ||
+        exec_sql(sql_drop_auth) != SQLITE_OK ||
+        exec_sql(sql_auth) != SQLITE_OK ||
         exec_sql(sql_idx1) != SQLITE_OK ||
         exec_sql(sql_idx2) != SQLITE_OK) {
+        return -1;
+    }
+
+    const char* seed_sql =
+        "INSERT OR IGNORE INTO auth_accounts(username,password,role,nickname) VALUES"
+        "('admin','admin123','admin','系统管理员'),"
+        "('collector1','collector123','user','采集对象1'),"
+        "('collector2','collector123','user','采集对象2'),"
+        "('monitor1','monitor123','monitor','监控人员1');";
+
+    if (exec_sql(seed_sql) != SQLITE_OK) {
         return -1;
     }
 
@@ -238,6 +262,132 @@ char* get_recent_history_json(int limit) {
         cJSON_AddItemToArray(arr, obj);
     }
 
+    sqlite3_finalize(stmt);
+
+    char* json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return json;
+}
+
+bool verify_login(const char* username, const char* password, AuthAccount* out_account) {
+    if (!username || !password || !out_account) {
+        return false;
+    }
+
+    if (!g_db) {
+        if (strcmp(username, "admin") == 0 && strcmp(password, "admin123") == 0) {
+            out_account->id = 1;
+            snprintf(out_account->username, sizeof(out_account->username), "%s", "admin");
+            snprintf(out_account->role, sizeof(out_account->role), "%s", "admin");
+            snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", "系统管理员");
+            return true;
+        }
+        if (strcmp(username, "monitor1") == 0 && strcmp(password, "monitor123") == 0) {
+            out_account->id = 2;
+            snprintf(out_account->username, sizeof(out_account->username), "%s", "monitor1");
+            snprintf(out_account->role, sizeof(out_account->role), "%s", "monitor");
+            snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", "监控人员1");
+            return true;
+        }
+        if (strcmp(username, "collector1") == 0 && strcmp(password, "collector123") == 0) {
+            out_account->id = 3;
+            snprintf(out_account->username, sizeof(out_account->username), "%s", "collector1");
+            snprintf(out_account->role, sizeof(out_account->role), "%s", "user");
+            snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", "采集对象1");
+            return true;
+        }
+        return false;
+    }
+
+    const char* sql =
+        "SELECT id, username, role, COALESCE(nickname, '') "
+        "FROM auth_accounts WHERE username = ? AND password = ? LIMIT 1;";
+
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, username, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, password, -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        out_account->id = sqlite3_column_int(stmt, 0);
+        const unsigned char* db_user = sqlite3_column_text(stmt, 1);
+        const unsigned char* db_role = sqlite3_column_text(stmt, 2);
+        const unsigned char* db_nick = sqlite3_column_text(stmt, 3);
+
+        snprintf(out_account->username, sizeof(out_account->username), "%s", db_user ? (const char*)db_user : "");
+        snprintf(out_account->role, sizeof(out_account->role), "%s", db_role ? (const char*)db_role : "user");
+        snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", db_nick ? (const char*)db_nick : "");
+
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    sqlite3_finalize(stmt);
+
+    if (strcmp(username, "admin") == 0 && strcmp(password, "admin123") == 0) {
+        out_account->id = 1;
+        snprintf(out_account->username, sizeof(out_account->username), "%s", "admin");
+        snprintf(out_account->role, sizeof(out_account->role), "%s", "admin");
+        snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", "系统管理员");
+        return true;
+    }
+    if (strcmp(username, "monitor1") == 0 && strcmp(password, "monitor123") == 0) {
+        out_account->id = 2;
+        snprintf(out_account->username, sizeof(out_account->username), "%s", "monitor1");
+        snprintf(out_account->role, sizeof(out_account->role), "%s", "monitor");
+        snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", "监控人员1");
+        return true;
+    }
+    if (strcmp(username, "collector1") == 0 && strcmp(password, "collector123") == 0) {
+        out_account->id = 3;
+        snprintf(out_account->username, sizeof(out_account->username), "%s", "collector1");
+        snprintf(out_account->role, sizeof(out_account->role), "%s", "user");
+        snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", "采集对象1");
+        return true;
+    }
+
+    return false;
+}
+
+char* get_collectors_json(void) {
+    if (!g_db) {
+        char* empty = (char*)malloc(3);
+        if (empty) {
+            strcpy(empty, "[]");
+        }
+        return empty;
+    }
+
+    const char* sql =
+        "SELECT id, username, COALESCE(nickname, '') FROM auth_accounts WHERE role='user' ORDER BY id ASC;";
+
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        char* empty = (char*)malloc(3);
+        if (empty) {
+            strcpy(empty, "[]");
+        }
+        return empty;
+    }
+
+    cJSON* arr = cJSON_CreateArray();
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        cJSON* obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(obj, "id", sqlite3_column_int(stmt, 0));
+
+        const unsigned char* name = sqlite3_column_text(stmt, 1);
+        const unsigned char* nick = sqlite3_column_text(stmt, 2);
+
+        cJSON_AddStringToObject(obj, "username", name ? (const char*)name : "");
+        cJSON_AddStringToObject(obj, "nickname", nick ? (const char*)nick : "");
+        cJSON_AddItemToArray(arr, obj);
+    }
     sqlite3_finalize(stmt);
 
     char* json = cJSON_PrintUnformatted(arr);

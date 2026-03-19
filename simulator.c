@@ -36,6 +36,7 @@ static int s_file_index = 0;
 static int s_last_line = 0;
 static bool s_loop_mode = true;
 static FILE* s_current_fp = NULL;
+static char s_profile[32] = "mixed";
 
 static FILE* open_with_fallback(const char* path) {
     FILE* fp = fopen(path, "r");
@@ -160,7 +161,8 @@ void init_users(void) {
         g_users[i].speed_per_minute = 0.0f;
         g_users[i].sent_lines = 0;
         g_users[i].buffer_index = 0;
-        memset(g_users[i].data_buffer, 0, sizeof(g_users[i].data_buffer));
+        memset(g_users[i].accel_buffer, 0, sizeof(g_users[i].accel_buffer));
+        memset(g_users[i].gyro_buffer, 0, sizeof(g_users[i].gyro_buffer));
         pthread_mutex_unlock(&g_users[i].mutex);
     }
 }
@@ -180,6 +182,32 @@ void sim_set_data_files(const char** files, int count, bool loop_mode) {
     }
 
     close_current_file();
+}
+
+bool sim_load_profile(const char* profile) {
+    if (!profile) {
+        return false;
+    }
+
+    if (strcmp(profile, "mixed") == 0) {
+        const char* files[] = {"data1.txt", "data2.txt"};
+        sim_set_data_files(files, 2, true);
+        snprintf(s_profile, sizeof(s_profile), "mixed");
+        return true;
+    }
+
+    if (strcmp(profile, "upstairs3") == 0) {
+        const char* files[] = {"data1.txt"};
+        sim_set_data_files(files, 1, true);
+        snprintf(s_profile, sizeof(s_profile), "upstairs3");
+        return true;
+    }
+
+    return false;
+}
+
+const char* sim_get_profile(void) {
+    return s_profile;
 }
 
 void sim_start(void) {
@@ -287,16 +315,18 @@ void* simulator_thread_func(void* arg) {
             continue;
         }
 
-        float magnitude = sqrtf(sample.ax * sample.ax + sample.ay * sample.ay + sample.az * sample.az);
+        float accel_magnitude = sqrtf(sample.ax * sample.ax + sample.ay * sample.ay + sample.az * sample.az);
+        float gyro_magnitude = sqrtf(sample.gx * sample.gx + sample.gy * sample.gy + sample.gz * sample.gz);
 
         User* user = &g_users[0];
         pthread_mutex_lock(&user->mutex);
 
-        user->data_buffer[user->buffer_index] = magnitude;
+        user->accel_buffer[user->buffer_index] = accel_magnitude;
+        user->gyro_buffer[user->buffer_index] = gyro_magnitude;
         user->buffer_index = (user->buffer_index + 1) % DATA_BUFFER_SIZE;
         user->sent_lines = s_last_line;
 
-        float filtered = (last_filtered * 0.8f) + (magnitude * 0.2f);
+        float filtered = (last_filtered * 0.8f) + (accel_magnitude * 0.2f);
 
         bool is_step = false;
         if (cooldown > 0) {

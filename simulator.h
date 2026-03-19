@@ -48,6 +48,18 @@ bool sim_is_running(void);
  */
 int sim_get_sent_lines(int user_id);
 
+/**
+ * @brief 加载预置数据场景
+ * @param profile 场景名：mixed 或 upstairs3
+ * @return 成功返回 true
+ */
+bool sim_load_profile(const char* profile);
+
+/**
+ * @brief 获取当前数据场景名
+ */
+const char* sim_get_profile(void);
+
 // ==========================================
 // 内部线程入口 (供 pthread_create 使用)
 // ==========================================

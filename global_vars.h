@@ -19,6 +19,7 @@
 #define BUFFER_SIZE       10       // 兼容旧代码的缓冲常量
 #define DATA_BUFFER_SIZE  32       // 传感器数据缓冲区大小
 #define MAX_FLOORS        99       // 最大楼层支持
+#define ROLE_LEN          16       // 角色长度
 
 // ==========================================================
 // 📦 数据结构定义
@@ -32,6 +33,7 @@
 typedef struct {
     int user_id;                      // 用户ID
     char username[USERNAME_LEN];      // 用户名
+    char role[ROLE_LEN];              // 角色：admin / user / monitor
     char device_id[DEVICE_ID_LEN];    // 终端/设备ID
     int current_floor;                // 当前楼层
     int total_steps;                  // 总步数
@@ -40,7 +42,8 @@ typedef struct {
     int buffer_index;                 // 环形缓冲区索引
     pthread_mutex_t mutex;            // 用户级互斥锁
 
-    float data_buffer[DATA_BUFFER_SIZE];
+    float accel_buffer[DATA_BUFFER_SIZE];
+    float gyro_buffer[DATA_BUFFER_SIZE];
 } User;
 
 /**
